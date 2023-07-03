@@ -102,6 +102,41 @@ public class TransactionTests {
 
     /**
      * Replicating the error with duplicate key exception in a transaction
+     */
+    @Test
+    public void FixedDuplicateKeyInTransaction() {
+        ClientSession session = client.startSession();
+
+        // try and do a bulk write with duplicate documents
+        MongoBulkWriteException mbwe = assertThrowsExactly(
+                MongoBulkWriteException.class,
+                () -> {
+                    session.startTransaction(txnOptions);
+                    collection.bulkWrite(session, writeModelsWithDuplicateKeys, options);
+                    session.commitTransaction();
+                });
+
+        // catch the duplicate key exception and abort the transaction manually
+        mbwe.getWriteErrors().forEach(e -> {
+            if (e.getCode() == 11000) {
+                session.abortTransaction();
+            }
+        });
+
+        // this is now false
+        assertFalse(session.hasActiveTransaction(), "activeTransaction");
+
+        // we retry the bulk write with the problem writemodels removed
+        session.startTransaction();
+        BulkWriteResult result = collection.bulkWrite(session, writeModelsValid, options);
+        session.commitTransaction();
+
+        // The transaction now succeeds
+        assertEquals(2, result.getInsertedCount());
+    }
+
+    /**
+     * Replicating the error with duplicate key exception in a transaction
      * but this time using the [withTransaction] method.
      */
     @Test
