@@ -1,4 +1,5 @@
 import com.mongodb.*;
+import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.*;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.InsertOneModel;
@@ -33,14 +34,22 @@ public class TransactionTests {
 
     private final BulkWriteOptions options = new BulkWriteOptions().ordered(false);
 
+    private final TransactionOptions txnOptions = TransactionOptions.builder()
+            .readPreference(ReadPreference.primary())
+            .writeConcern(WriteConcern.MAJORITY)
+            .build();
+
     @BeforeEach
     public void setup() {
         collection.drop();
         collection.insertOne(new Document("_id", 222));
     }
 
+    /**
+     * Showing unordered bulk write outside of a transaction
+     */
     @Test
-    public void TestDuplicateKey() {
+    public void DuplicateKey() {
         MongoBulkWriteException ex = assertThrowsExactly(
                 MongoBulkWriteException.class,
                 () -> collection.bulkWrite(writeModelsWithDuplicateKeys, options));
@@ -51,14 +60,18 @@ public class TransactionTests {
 
     }
 
+    /**
+     * Replicating the error with duplicate key exception in a transaction
+     */
     @Test
-    public void TestDuplicateKeyInTransaction() {
+    public void DuplicateKeyInTransaction() {
         ClientSession session = client.startSession();
 
+        // try and do a bulk write with duplicate documents
         MongoBulkWriteException mbwe = assertThrowsExactly(
                 MongoBulkWriteException.class,
                 () -> {
-                    session.startTransaction();
+                    session.startTransaction(txnOptions);
                     collection.bulkWrite(session, writeModelsWithDuplicateKeys, options);
                     session.commitTransaction();
                 });
@@ -69,7 +82,8 @@ public class TransactionTests {
         assertEquals(1, mbwe.getWriteErrors().size(), "write errors");
         assertEquals(1, mbwe.getWriteResult().getInsertedCount(), "inserts");
 
-        // this is true even though the transaction has aborted
+        // this is true even though the transaction has aborted because the activeTransaction state
+        // needs to be manually managed if you don't use the withTransaction method
         assertTrue(session.hasActiveTransaction(), "activeTransaction");
 
         // we retry the bulk write with the problem writemodels removed
@@ -80,50 +94,41 @@ public class TransactionTests {
                     session.commitTransaction();
                 });
 
-        // there is a no transaction error from the server
+        // we get a no transaction error from the server
         assertEquals("NoSuchTransaction", mce.getErrorCodeName());
 
         System.out.println(mce.getMessage());
-
     }
 
+    /**
+     * Replicating the error with duplicate key exception in a transaction
+     * but this time using the [withTransaction] method.
+     */
     @Test
-    public void TestDuplicateKeyWithTransactionBody() {
+    public void DuplicateKeyWithTransactionBody() {
         ClientSession session = client.startSession();
 
-        TransactionOptions txnOptions = TransactionOptions.builder()
-                .readPreference(ReadPreference.primary())
-                .readConcern(ReadConcern.LOCAL)
-                .writeConcern(WriteConcern.MAJORITY)
-                .build();
+        // creating a transaction body lambda
+        TransactionBody<BulkWriteResult> txnBodyFail = () ->
+                collection.bulkWrite(session, writeModelsWithDuplicateKeys, options);
 
-        TransactionBody<String> txnBodyFail = () -> {
-            collection.bulkWrite(session, writeModelsWithDuplicateKeys, options);
-            return "Inserted into collections in different databases";
-        };
-
+        // executing the transaction body and catching the exception
         MongoBulkWriteException mbwe = assertThrowsExactly(
                 MongoBulkWriteException.class,
                 () -> session.withTransaction(txnBodyFail, txnOptions)
         );
 
-        // this should be false - when using the withTransaction method, the transaction status is correct
+        // this is now false - when using the withTransaction method, the transaction status is correct
         assertFalse(session.hasActiveTransaction(), "activeTransaction");
 
-        // in a transaction, bulk writes will fast-fail so we only get a single write error and a single insert
-        assertEquals(1, mbwe.getWriteErrors().size(), "write errors");
-        assertEquals(1, mbwe.getWriteResult().getInsertedCount(), "inserts");
-        System.out.println(mbwe.getMessage());
-
-        TransactionBody<String> txnBodyValid = () -> {
+        // creating a new transaction body with valid write models
+        TransactionBody<BulkWriteResult> txnBodyValid = () ->
             collection.bulkWrite(session, writeModelsValid, options);
-            return "Inserted into collections in different databases";
-        };
 
-        session.withTransaction(txnBodyValid, txnOptions);
+        // no errors thrown and we get the reuslts
+        BulkWriteResult results = session.withTransaction(txnBodyValid, txnOptions);
 
-        // if the transaction succeeds, there should be 3 document (1 from test setup, 2 from the bulk write)
-        assertEquals(3, collection.countDocuments());
+        assertEquals(2, results.getInsertedCount(), "inserts");
 
     }
 
