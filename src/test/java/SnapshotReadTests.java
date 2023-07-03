@@ -40,7 +40,7 @@ public class SnapshotReadTests {
     public void TestSnapshotSession() {
         ClientSessionOptions sessionOptions = ClientSessionOptions.builder().snapshot(true).build();
 
-        // insert some documents before starting the session
+        // insert a document before starting the session
         collection.insertOne(new Document("_id", 111));
 
         ClientSession session = client.startSession(sessionOptions);
